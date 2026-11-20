@@ -29,6 +29,9 @@ BEGIN
   RETURN COALESCE(v_pontos,0);
 END $$;
 
+
+
+
 CREATE OR REPLACE FUNCTION f_pontos_escalacao(p_tecnico_id INT, p_rodada_num INT)
 RETURNS NUMERIC LANGUAGE plpgsql STABLE AS $$
 DECLARE v_total NUMERIC:=0; v_tecnico_id_atleta INT; v_clube INT; v_mandante INT; v_visitante INT; v_pm INT; v_pv INT; v_pos NUMERIC;
@@ -71,6 +74,10 @@ BEGIN SELECT estado INTO v_estado FROM rodada WHERE numero=OLD.rodada_numero;
  RETURN OLD; END $$;
 CREATE TRIGGER trg_bloqueia_delete_escalacao BEFORE DELETE ON escalacao FOR EACH ROW EXECUTE FUNCTION tg_bloqueia_delete_escalacao();
 
+
+
+
+
 CREATE OR REPLACE FUNCTION tg_valida_escalacao_atleta_func() RETURNS TRIGGER LANGUAGE plpgsql AS $$
 DECLARE v_tecnico INT; v_rodada INT; v_atleta INT; v_estado VARCHAR; v_situacao VARCHAR; v_pos VARCHAR(3); v_esquema VARCHAR(10); v_patrimonio NUMERIC; v_total NUMERIC; v_preco NUMERIC; v_atleta_excluir INT;
 BEGIN
@@ -106,6 +113,11 @@ BEGIN
 END $$;
 CREATE TRIGGER trg_valida_escalacao_atleta BEFORE INSERT OR UPDATE OR DELETE ON escalacao_atleta FOR EACH ROW EXECUTE FUNCTION tg_valida_escalacao_atleta_func();
 
+
+
+
+
+
 CREATE OR REPLACE FUNCTION tg_protege_dados_rodada_func() RETURNS TRIGGER LANGUAGE plpgsql AS $$
 DECLARE v_partida INT; v_rodada INT; v_estado VARCHAR;
 BEGIN
@@ -129,6 +141,10 @@ BEGIN SELECT estado INTO v_estado FROM rodada WHERE numero=CASE WHEN TG_OP='DELE
  IF TG_OP='UPDATE' THEN SELECT estado INTO v_estado FROM rodada WHERE numero=OLD.rodada_numero; IF v_estado='consolidada' THEN RAISE EXCEPTION 'Não é permitido mover partida de rodada consolidada.'; END IF; END IF;
  IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF; END $$;
 CREATE TRIGGER trg_protege_partida BEFORE INSERT OR UPDATE OR DELETE ON partida FOR EACH ROW EXECUTE FUNCTION tg_protege_partida_func();
+
+
+
+
 
 CREATE OR REPLACE PROCEDURE prc_confirma_escalacao(p_tecnico_id INT,p_rodada_num INT) LANGUAGE plpgsql AS $$
 DECLARE v_esquema VARCHAR(10); v_estado VARCHAR; v_capitaes INT; v_total INT; v_preco NUMERIC; v_patrimonio NUMERIC; v_qtd RECORD; v_cont INT;
@@ -154,6 +170,10 @@ BEGIN
  UPDATE escalacao SET estado='confirmada',data_confirmacao=CURRENT_TIMESTAMP WHERE tecnico_id=p_tecnico_id AND rodada_numero=p_rodada_num;
 END $$;
 
+
+
+
+
 CREATE OR REPLACE PROCEDURE prc_entrar_liga(p_tecnico_id INT,p_liga_id INT,p_codigo_convite VARCHAR) LANGUAGE plpgsql AS $$
 DECLARE v_tipo VARCHAR; v_codigo VARCHAR; v_limite INT; v_total INT;
 BEGIN
@@ -166,9 +186,17 @@ BEGIN
  INSERT INTO participacao_liga(tecnico_id,liga_id,data_entrada) VALUES(p_tecnico_id,p_liga_id,CURRENT_DATE);
 END $$;
 
+
+
+
 CREATE OR REPLACE FUNCTION tg_dono_participa_liga_func() RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN INSERT INTO participacao_liga(tecnico_id,liga_id,data_entrada) VALUES(NEW.dono_id,NEW.id,CURRENT_DATE) ON CONFLICT DO NOTHING; RETURN NEW; END $$;
 CREATE TRIGGER trg_dono_participa_liga AFTER INSERT ON liga FOR EACH ROW EXECUTE FUNCTION tg_dono_participa_liga_func();
+
+
+
+
+
 
 CREATE OR REPLACE FUNCTION tg_transicao_rodada_func() RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
@@ -189,6 +217,11 @@ BEGIN
 END $$;
 CREATE OR REPLACE PROCEDURE prc_fechar_rodada(p_num INT) LANGUAGE plpgsql AS $$
 BEGIN UPDATE rodada SET estado='fechada' WHERE numero=p_num AND estado='aberta'; IF NOT FOUND THEN RAISE EXCEPTION 'Somente rodada aberta pode ser fechada.'; END IF; END $$;
+
+
+
+
+
 
 CREATE OR REPLACE PROCEDURE prc_consolidar_rodada(p_rodada_num INT) LANGUAGE plpgsql AS $$
 DECLARE v_estado VARCHAR; r RECORD; v_pts NUMERIC; v_media NUMERIC; v_var NUMERIC; v_preco_ant NUMERIC; v_preco_novo NUMERIC; v_delta NUMERIC; r2 RECORD;
