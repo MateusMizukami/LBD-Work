@@ -1,33 +1,8 @@
--- Liga FACOM Fantasy
--- DDL limpo e organizado para PostgreSQL 16+.
--- Os IDs de clube, atleta e partida são preservados conforme a API do Cartola.
--- tecnico.id e liga.id usam GENERATED ALWAYS: INSERTs devem omitir essas colunas.
--- Para recuperar um registro, referencie-o por atributo único (ex.: email de técnico)
--- em vez de presumir valores fixos para os IDs.
--- Posição e situação são armazenadas por siglas/textos; o programa de carga
--- deve converter os IDs da API para as siglas/valores usados nos CHECKs.
--- NUMERIC é usado para cartoletas e pontuações para evitar erros de representação
--- binária e arredondamento comuns em REAL/DOUBLE PRECISION.
-
--- ATENÇÃO: este script recria o schema do zero e APAGA todos os dados de liga_facom.
--- Isso permite executar o DDL novamente durante os testes. Não use em banco com dados
--- que precisem ser preservados.
 DROP SCHEMA IF EXISTS liga_facom CASCADE;
 CREATE SCHEMA liga_facom;
 
 SET search_path TO liga_facom;
 
--- Política referencial geral: ON UPDATE RESTRICT em todas as FKs porque as chaves
--- (IDs da API, números de rodada, siglas e nomes de esquema) são identificadores
--- estáveis e não devem ser alterados depois de referenciados. ON DELETE é definido
--- individualmente abaixo: RESTRICT preserva histórico; CASCADE remove registros
--- dependentes que não têm significado sem o registro-pai.
-
--- TIPOS NUMÉRICOS: pontos e cartoletas usam NUMERIC, porque ponto flutuante não representa
--- exatamente e acumula erro de arredondamento nas somas de pontos e nos cálculos de patrimônio.
-
--- Cadastro de atletas da API. Posição e situação usam códigos textuais mapeados pela carga.
--- atleta.situacao_atual 'nulo' é um estado do jogo para "sem previsão de jogar". É o padrão para atletas sem dados na carga.
 CREATE TABLE liga_facom.atleta (
     id integer NOT NULL,
     nome_completo character varying(100) NOT NULL,
@@ -38,25 +13,18 @@ CREATE TABLE liga_facom.atleta (
     CONSTRAINT atleta_situacao_atual_check CHECK (((situacao_atual)::text = ANY ((ARRAY['provavel'::character varying, 'duvida'::character varying, 'suspenso'::character varying, 'contundido'::character varying, 'nulo'::character varying])::text[])))
 );
 
--- Histórico do clube ao qual cada atleta pertence em cada rodada.
--- PK sem clube_id: o atleta está em um único clube por rodada. 
 CREATE TABLE liga_facom.atleta_clube_rodada (
     atleta_id integer NOT NULL,
     rodada_numero integer NOT NULL,
     clube_id integer NOT NULL
 );
 
--- Participação do atleta em uma partida, incluindo se entrou em campo.
--- RESTRICT em atleta e partida, pois o desempenho é histórico. É entidade fraca entao PK (atleta_id, partida_id).
 CREATE TABLE liga_facom.atleta_partida (
     atleta_id integer NOT NULL,
     partida_id integer NOT NULL,
     entrou_em_campo boolean DEFAULT false NOT NULL
 );
 
--- Quantidade de cada scout registrada para um atleta em uma partida.
--- FK: só existe scout de atleta que tem registro naquela partida. 
--- RESTRICT: estatísticas são histórico. 
 CREATE TABLE liga_facom.atleta_partida_scout (
     atleta_id integer NOT NULL,
     partida_id integer NOT NULL,
@@ -65,7 +33,6 @@ CREATE TABLE liga_facom.atleta_partida_scout (
     CONSTRAINT atleta_partida_scout_quantidade_check CHECK ((quantidade >= 0))
 );
 
--- Clubes do Brasileirão, identificados pelo ID externo da API.
 CREATE TABLE liga_facom.clube (
     id integer NOT NULL,
     nome character varying(100) NOT NULL,
@@ -73,9 +40,6 @@ CREATE TABLE liga_facom.clube (
     escudo text
 );
 
--- RESTRICT em técnico, rodada e esquema, pois a escalação é histórico de pontuação, não se apaga quem já tem escalações.
--- PK (tecnico_id, rodada_numero) garante no máximo uma escalação por técnico por rodada. O CHECK liga estado e data, confirmada se, e somente
--- se, tem data_confirmacao.
 CREATE TABLE liga_facom.escalacao (
     tecnico_id integer NOT NULL,
     rodada_numero integer NOT NULL,
@@ -86,10 +50,6 @@ CREATE TABLE liga_facom.escalacao (
     CONSTRAINT escalacao_estado_check CHECK (((estado)::text = ANY ((ARRAY['em_edicao'::character varying, 'confirmada'::character varying])::text[])))
 );
 
--- PK (tecnico, rodada, atleta): o mesmo atleta não aparece duas vezes na escalação. 
--- FK composta para escalacao com CASCADE: os itens dependem da escalação. 
--- RESTRICT em atleta: não se apaga atleta que já foi escalado. 
--- preco_pago fica registrado porque o preço do atleta pode mudar. CHECK >= 1.00, pois o preço nunca fica abaixo de $ 1,00.
 CREATE TABLE liga_facom.escalacao_atleta (
     tecnico_id integer NOT NULL,
     rodada_numero integer NOT NULL,
@@ -99,7 +59,6 @@ CREATE TABLE liga_facom.escalacao_atleta (
     CONSTRAINT escalacao_atleta_preco_pago_check CHECK ((preco_pago >= 1.00))
 );
 
--- goleiro e técnico fixos em 1. CHECK de tabela exige total de 11 jogadores de linha e goleiro.
 CREATE TABLE liga_facom.esquema_tatico (
     nome character varying(10) NOT NULL,
     qtd_lateral integer NOT NULL,
@@ -117,8 +76,6 @@ CREATE TABLE liga_facom.esquema_tatico (
     CONSTRAINT esquema_tatico_qtd_zagueiro_check CHECK ((qtd_zagueiro >= 0))
 );
 
--- Histórico do preço de cada atleta por rodada.
--- RESTRICT: o histórico de preços não deve sumir com a exclusão de atleta ou rodada. CHECK >= 1.00, pois o preço nunca fica abaixo de $ 1,00.
 CREATE TABLE liga_facom.historico_preco (
     atleta_id integer NOT NULL,
     rodada_numero integer NOT NULL,
@@ -126,7 +83,6 @@ CREATE TABLE liga_facom.historico_preco (
     CONSTRAINT historico_preco_preco_check CHECK ((preco >= 1.00))
 );
 
--- RESTRICT em dono_id porque não se apaga técnico que é dono de liga, senão ela ficaria sem dono.
 CREATE TABLE liga_facom.liga (
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     nome character varying(100) NOT NULL,
@@ -140,16 +96,12 @@ CREATE TABLE liga_facom.liga (
     CONSTRAINT liga_privada_codigo_check CHECK (tipo <> 'privada' OR codigo_convite IS NOT NULL)
 );
 
--- tecnico_id RESTRICT: não se apaga técnico que participa de liga.
--- liga_id CASCADE: ao apagar a liga, as participações dela deixam de existir.
 CREATE TABLE liga_facom.participacao_liga (
     tecnico_id integer NOT NULL,
     liga_id integer NOT NULL,
     data_entrada date DEFAULT CURRENT_DATE NOT NULL
 );
 
--- Partidas do campeonato, com mandante, visitante e placar.
--- RESTRICT nas FKs: partida é dado histórico, não se apaga rodada ou clube que tenham partidas. Placares aceitam NULL até o jogo acontecer (sem DEFAULT 0, para não parecer 0 x 0). 
 CREATE TABLE liga_facom.partida (
     id integer NOT NULL,
     local text,
@@ -166,7 +118,6 @@ CREATE TABLE liga_facom.partida (
     CONSTRAINT partida_placar_visitante_check CHECK ((placar_visitante >= 0))
 );
 
--- RESTRICT: o patrimônio por rodada é histórico, não se apaga técnico nem rodada que tenham registros aqui. 
 CREATE TABLE liga_facom.patrimonio_rodada (
     tecnico_id integer NOT NULL,
     rodada_numero integer NOT NULL,
@@ -174,7 +125,6 @@ CREATE TABLE liga_facom.patrimonio_rodada (
     CONSTRAINT patrimonio_rodada_patrimonio_check CHECK ((patrimonio >= (0)::numeric))
 );
 
--- Rodadas do campeonato e seus estados operacionais.
 CREATE TABLE liga_facom.rodada (
     numero integer NOT NULL,
     estado character varying(20) NOT NULL,
@@ -182,7 +132,6 @@ CREATE TABLE liga_facom.rodada (
     CONSTRAINT rodada_numero_check CHECK (((numero >= 1) AND (numero <= 38)))
 );
 
--- tecnico.patrimonio_atual: DEFAULT 100.00 para que todo técnico começe com $ 100,00 e CHECK >= 0 para evitar patrimônio ser negativo.
 CREATE TABLE liga_facom.tecnico (
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     nome character varying(100) NOT NULL,
@@ -194,19 +143,12 @@ CREATE TABLE liga_facom.tecnico (
     CONSTRAINT tecnico_patrimonio_atual_check CHECK ((patrimonio_atual >= (0)::numeric))
 );
 
--- Catálogo de scouts e seus valores em pontos.
 CREATE TABLE liga_facom.tipo_scout (
     sigla character varying(10) NOT NULL,
     descricao text NOT NULL,
     valor_pontos numeric(4,2) NOT NULL
 );
 
--- Relação entre scouts e posições às quais eles se aplicam.
--- Regra adotada: cada scout deve ter ao menos uma linha nesta tabela. Scout irrestrito
--- deve ter as seis posições (gol, lat, zag, mei, ata, tec). A função de pontuação
--- considera o scout aplicável somente quando existe linha para a posição do atleta.
--- CASCADE em sigla_scout: a tabela só descreve o tipo de scout, se ele for apagado, suas posições não fazem sentido sozinhas. 
--- O CHECK de posicao deve ser idêntico ao de atleta.posicao. 
 CREATE TABLE liga_facom.tipo_scout_posicao (
     sigla_scout character varying(10) NOT NULL,
     posicao character varying(3) NOT NULL,
@@ -246,7 +188,6 @@ ALTER TABLE ONLY liga_facom.historico_preco
 ALTER TABLE ONLY liga_facom.liga
     ADD CONSTRAINT liga_codigo_convite_key UNIQUE (codigo_convite);
 
-
 ALTER TABLE ONLY liga_facom.participacao_liga
     ADD CONSTRAINT participacao_liga_pkey PRIMARY KEY (tecnico_id, liga_id);
 
@@ -262,17 +203,14 @@ ALTER TABLE ONLY liga_facom.rodada
 ALTER TABLE ONLY liga_facom.tecnico
     ADD CONSTRAINT tecnico_email_key UNIQUE (email);
 
-
 ALTER TABLE ONLY liga_facom.tipo_scout
     ADD CONSTRAINT tipo_scout_pkey PRIMARY KEY (sigla);
 
 ALTER TABLE ONLY liga_facom.tipo_scout_posicao
     ADD CONSTRAINT tipo_scout_posicao_pkey PRIMARY KEY (sigla_scout, posicao);
 
--- no máximo um capitão por escalação 
 CREATE UNIQUE INDEX uq_escalacao_um_capitao ON liga_facom.escalacao_atleta USING btree (tecnico_id, rodada_numero) WHERE is_capitao;
 
--- só as rodadas 'aberta' entram nele e ele é único, então apenas uma rodada fica aberta.
 CREATE UNIQUE INDEX uq_rodada_aberta ON liga_facom.rodada USING btree (estado) WHERE ((estado)::text = 'aberta'::text);
 
 ALTER TABLE ONLY liga_facom.atleta_clube_rodada
@@ -344,3 +282,10 @@ ALTER TABLE ONLY liga_facom.patrimonio_rodada
 ALTER TABLE ONLY liga_facom.tipo_scout_posicao
     ADD CONSTRAINT tipo_scout_posicao_sigla_scout_fkey FOREIGN KEY (sigla_scout) REFERENCES liga_facom.tipo_scout(sigla) ON UPDATE RESTRICT ON DELETE CASCADE;
 
+CREATE INDEX IF NOT EXISTS ix_partida_rodada_valida ON liga_facom.partida(rodada_numero, valida);
+CREATE INDEX IF NOT EXISTS ix_atleta_partida_partida ON liga_facom.atleta_partida(partida_id, atleta_id);
+CREATE INDEX IF NOT EXISTS ix_scout_partida_atleta ON liga_facom.atleta_partida_scout(partida_id, atleta_id);
+CREATE INDEX IF NOT EXISTS ix_escalacao_rodada_estado ON liga_facom.escalacao(rodada_numero, estado);
+CREATE INDEX IF NOT EXISTS ix_escalacao_atleta_rodada ON liga_facom.escalacao_atleta(rodada_numero, atleta_id);
+CREATE INDEX IF NOT EXISTS ix_historico_preco_rodada ON liga_facom.historico_preco(rodada_numero, atleta_id);
+CREATE INDEX IF NOT EXISTS ix_patrimonio_tecnico_rodada ON liga_facom.patrimonio_rodada(tecnico_id, rodada_numero);
