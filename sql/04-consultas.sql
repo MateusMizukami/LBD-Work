@@ -1,247 +1,293 @@
-/*(a) Crie a visão do mercado: para cada atleta disponível para escalação na rodada aberta,
-o apelido, o clube, a posição, a situação, o preço atual, a média e a pontuação na última
-rodada consolidada em que entrou em campo*/
+SET search_path TO liga_facom;
+
+-- (a) Mercado da rodada aberta, com média e última pontuação consolidada.
+-- Uma linha por atleta e rodada, ainda que ele tenha mais de uma partida.
+CREATE OR REPLACE VIEW vw_pontos_jogador AS
+SELECT ap.atleta_id,
+       r.numero AS rodada_numero,
+       f_pontos_atleta(ap.atleta_id, r.numero) AS pontos
+FROM atleta_partida ap
+JOIN atleta a ON a.id = ap.atleta_id
+JOIN partida p ON p.id = ap.partida_id
+JOIN rodada r ON r.numero = p.rodada_numero
+WHERE a.posicao <> 'tec' AND ap.entrou_em_campo AND p.valida AND r.estado = 'consolidada'
+GROUP BY ap.atleta_id, r.numero;
+
+CREATE OR REPLACE VIEW vw_pontos_tecnico_real AS
+SELECT acr.atleta_id,
+       r.numero AS rodada_numero,
+       f_pontos_tecnico_real(acr.atleta_id, r.numero) AS pontos
+FROM atleta_clube_rodada acr
+JOIN atleta a ON a.id = acr.atleta_id
+JOIN rodada r ON r.numero = acr.rodada_numero
+JOIN partida p ON p.rodada_numero = r.numero AND (acr.clube_id = p.mandante_id OR acr.clube_id = p.visitante_id)
+WHERE a.posicao = 'tec' AND r.estado = 'consolidada' AND p.valida AND p.placar_mandante IS NOT NULL AND p.placar_visitante IS NOT NULL
+GROUP BY acr.atleta_id, r.numero;
+
+CREATE OR REPLACE VIEW vw_pontos_atleta AS
+SELECT a.id AS atleta_id,
+       a.apelido,
+       a.posicao,
+       r.numero AS rodada_numero,
+       COALESCE(j.pontos, t.pontos) AS pontos
+FROM atleta a
+JOIN rodada r ON r.estado = 'consolidada'
+LEFT JOIN vw_pontos_jogador j ON j.atleta_id = a.id AND j.rodada_numero = r.numero
+LEFT JOIN vw_pontos_tecnico_real t ON t.atleta_id = a.id AND t.rodada_numero = r.numero
+WHERE j.atleta_id IS NOT NULL OR t.atleta_id IS NOT NULL;
+
+CREATE OR REPLACE VIEW vw_resumo_atleta AS
+SELECT atleta_id,
+       COUNT(*) AS qtd_rodadas,
+       SUM(pontos) / COUNT(*) AS media,
+       MAX(rodada_numero) AS ultima_rodada
+FROM vw_pontos_atleta
+GROUP BY atleta_id;
 
 CREATE OR REPLACE VIEW vw_mercado AS
-SELECT 
-    a.id AS atleta_id,
-    a.apelido,
-    c.nome AS clube,
-    a.posicao,
-    a.situacao_atual,
-    hp.preco AS preco_atual,
-   (SELECT AVG(f_pontos_atleta(ap.atleta_id, p.rodada_numero)) 
-     FROM atleta_partida ap 
-     JOIN partida p ON ap.partida_id = p.id 
-     WHERE ap.atleta_id = a.id AND ap.entrou_em_campo = TRUE) AS media,
-     (SELECT f_pontos_atleta(ap.atleta_id, p.rodada_numero)
-     FROM atleta_partida ap 
-     JOIN partida p ON ap.partida_id = p.id 
-     JOIN rodada r ON p.rodada_numero = r.numero
-     WHERE ap.atleta_id = a.id AND ap.entrou_em_campo = TRUE AND r.estado = 'consolidada'
-     ORDER BY p.rodada_numero DESC LIMIT 1) AS pontuacao_ultima_rodada
+SELECT a.id AS atleta_id,
+       a.apelido,
+       c.nome AS clube,
+       a.posicao,
+       a.situacao_atual,
+       hp.preco AS preco_atual,
+       ra.media,
+       pa.pontos AS pontuacao_ultima_rodada
 FROM atleta a
-JOIN atleta_clube_rodada acr ON a.id = acr.atleta_id
-JOIN clube c ON acr.clube_id = c.id
-JOIN rodada r_aberta ON acr.rodada_numero = r_aberta.numero AND r_aberta.estado = 'aberta'
-JOIN historico_preco hp ON hp.atleta_id = a.id AND hp.rodada_numero = r_aberta.numero;
+JOIN atleta_clube_rodada acr ON acr.atleta_id = a.id
+JOIN clube c ON c.id = acr.clube_id
+JOIN rodada r ON r.numero = acr.rodada_numero
+JOIN historico_preco hp ON hp.atleta_id = a.id AND hp.rodada_numero = r.numero
+LEFT JOIN vw_resumo_atleta ra ON ra.atleta_id = a.id
+LEFT JOIN vw_pontos_atleta pa ON pa.atleta_id = a.id AND pa.rodada_numero = ra.ultima_rodada
+WHERE r.estado = 'aberta' AND (a.situacao_atual = 'provavel' OR a.situacao_atual = 'duvida');
 
+-- (b) Ranking acumulado por liga. A posição é 1 mais o número de técnicos à frente.
+CREATE OR REPLACE VIEW vw_pontos_escalacao AS
+SELECT e.tecnico_id,
+       e.rodada_numero,
+       e.data_confirmacao,
+       f_pontos_escalacao(e.tecnico_id, e.rodada_numero) AS pontos
+FROM escalacao e
+JOIN rodada r ON r.numero = e.rodada_numero
+WHERE e.estado = 'confirmada' AND r.estado = 'consolidada';
 
-/*(b) Crie a visão do ranking: para cada liga e cada técnico participante, a pontuação acumulada e a posição do técnico na liga. Técnicos empatados ocupam a mesma posição.*/
+CREATE OR REPLACE VIEW vw_total_tecnico AS
+SELECT t.id AS tecnico_id,
+       COALESCE(SUM(pe.pontos), 0) AS pontuacao_acumulada
+FROM tecnico t
+LEFT JOIN vw_pontos_escalacao pe ON pe.tecnico_id = t.id
+GROUP BY t.id;
 
+CREATE OR REPLACE VIEW vw_total_participante AS
+SELECT pl.liga_id, pl.tecnico_id, tt.pontuacao_acumulada
+FROM participacao_liga pl
+JOIN vw_total_tecnico tt ON tt.tecnico_id = pl.tecnico_id;
 
 CREATE OR REPLACE VIEW vw_ranking_liga AS
-WITH pontuacao_tecnicos AS (
-    SELECT 
-        pl.liga_id,
-        pl.tecnico_id,
-        COALESCE(SUM(f_pontos_escalacao(e.tecnico_id, e.rodada_numero)), 0) AS pontuacao_acumulada
-    FROM participacao_liga pl
-    LEFT JOIN escalacao e ON pl.tecnico_id = e.tecnico_id AND e.estado = 'confirmada'
-    GROUP BY pl.liga_id, pl.tecnico_id
-)
-SELECT 
-    liga_id,
-    tecnico_id,
-    pontuacao_acumulada,
-    RANK() OVER (PARTITION BY liga_id ORDER BY pontuacao_acumulada DESC) AS posicao
-FROM pontuacao_tecnicos;
+SELECT atual.liga_id,
+       atual.tecnico_id,
+       atual.pontuacao_acumulada,
+       1 + COUNT(outro.tecnico_id) AS posicao
+FROM vw_total_participante atual
+LEFT JOIN vw_total_participante outro ON outro.liga_id = atual.liga_id AND outro.pontuacao_acumulada > atual.pontuacao_acumulada
+GROUP BY atual.liga_id, atual.tecnico_id, atual.pontuacao_acumulada;
 
+-- (c) Cinco melhores por posição. No empate, o menor ID aparece primeiro.
+CREATE OR REPLACE VIEW vw_ultima_rodada_preco AS
+SELECT atleta_id, MAX(rodada_numero) AS rodada_numero
+FROM historico_preco
+GROUP BY atleta_id;
 
+CREATE OR REPLACE VIEW vw_custo_beneficio AS
+SELECT a.id AS atleta_id,
+       a.posicao,
+       a.apelido,
+       ra.media AS media_pontos,
+       COALESCE(hp.preco_apos_rodada, hp.preco) AS preco_atual,
+       ra.media / COALESCE(hp.preco_apos_rodada, hp.preco) AS custo_beneficio
+FROM atleta a
+JOIN vw_resumo_atleta ra ON ra.atleta_id = a.id
+JOIN vw_ultima_rodada_preco ur ON ur.atleta_id = a.id
+JOIN historico_preco hp ON hp.atleta_id = ur.atleta_id AND hp.rodada_numero = ur.rodada_numero
+WHERE ra.qtd_rodadas >= 3;
 
+SELECT atual.posicao,
+       atual.apelido,
+       atual.media_pontos,
+       atual.preco_atual,
+       atual.custo_beneficio
+FROM vw_custo_beneficio atual
+LEFT JOIN vw_custo_beneficio outro
+  ON outro.posicao = atual.posicao AND (
+     outro.custo_beneficio > atual.custo_beneficio
+     OR (outro.custo_beneficio = atual.custo_beneficio AND outro.atleta_id < atual.atleta_id)
+ )
+GROUP BY atual.atleta_id, atual.posicao, atual.apelido, atual.media_pontos,
+         atual.preco_atual, atual.custo_beneficio
+HAVING COUNT(outro.atleta_id) < 5
+ORDER BY atual.posicao, atual.custo_beneficio DESC, atual.atleta_id;
 
-/*(c) Os 5 atletas de cada posição com melhor custo-benefício (média de pontos dividida pelo
-preço atual), considerando apenas atletas que entraram em campo em pelo menos 3
-rodadas.*/
+-- (d) Top da rodada. Parâmetro de exemplo: rodada 5.
+-- A confirmação mais antiga ganha o empate. O ID resolve horários idênticos.
+SELECT pe.tecnico_id,
+       t.nome_time,
+       pe.pontos AS pontuacao,
+       a.apelido AS capitao
+FROM vw_pontos_escalacao pe
+JOIN tecnico t ON t.id = pe.tecnico_id
+JOIN escalacao_atleta ea ON ea.tecnico_id = pe.tecnico_id AND ea.rodada_numero = pe.rodada_numero AND ea.is_capitao
+JOIN atleta a ON a.id = ea.atleta_id
+LEFT JOIN vw_pontos_escalacao outro
+  ON outro.rodada_numero = pe.rodada_numero AND (
+     outro.pontos > pe.pontos
+     OR (outro.pontos = pe.pontos AND outro.data_confirmacao < pe.data_confirmacao)
+     OR (outro.pontos = pe.pontos AND outro.data_confirmacao = pe.data_confirmacao AND outro.tecnico_id < pe.tecnico_id)
+ )
+WHERE pe.rodada_numero = 5 AND outro.tecnico_id IS NULL;
 
-WITH stats_atletas AS (
-    SELECT 
-        a.id,
-        a.apelido,
-        a.posicao,
-        COUNT(ap.partida_id) AS qtd_rodadas,
-        AVG(f_pontos_atleta(a.id, p.rodada_numero)) AS media_pontos,
-        (SELECT hp.preco FROM historico_preco hp WHERE hp.atleta_id = a.id ORDER BY hp.rodada_numero DESC LIMIT 1) AS preco_atual
-    FROM atleta a
-    JOIN atleta_partida ap ON a.id = ap.atleta_id
-    JOIN partida p ON ap.partida_id = p.id
-    WHERE ap.entrou_em_campo = TRUE
-    GROUP BY a.id, a.apelido, a.posicao
-    HAVING COUNT(DISTINCT p.rodada_numero) >= 3
-),
-custo_beneficio AS (
-    SELECT 
-        id, apelido, posicao, media_pontos, preco_atual,
-        (media_pontos / NULLIF(preco_atual, 0)) AS cb,
-        ROW_NUMBER() OVER (PARTITION BY posicao ORDER BY (media_pontos / NULLIF(preco_atual, 0)) DESC) as rn
-    FROM stats_atletas
-)
-SELECT posicao, apelido, media_pontos, preco_atual, cb
-FROM custo_beneficio
-WHERE rn <= 5;
+-- (e) Clube com mais jogos sem sofrer gol nas últimas cinco rodadas consolidadas.
+CREATE OR REPLACE VIEW vw_ultimas_cinco_rodadas AS
+SELECT r.numero
+FROM rodada r
+LEFT JOIN rodada posterior ON posterior.numero > r.numero AND posterior.estado = 'consolidada'
+WHERE r.estado = 'consolidada'
+GROUP BY r.numero
+HAVING COUNT(posterior.numero) < 5;
 
+CREATE OR REPLACE VIEW vw_jogos_sem_sofrer_gol AS
+SELECT c.id AS clube_id,
+       c.nome,
+       COUNT(*) AS jogos_sem_sofrer_gol
+FROM clube c
+JOIN partida p ON c.id = p.mandante_id OR c.id = p.visitante_id
+JOIN vw_ultimas_cinco_rodadas r ON r.numero = p.rodada_numero
+WHERE p.valida
+  AND (
+      (c.id = p.mandante_id AND p.placar_visitante = 0)
+      OR (c.id = p.visitante_id AND p.placar_mandante = 0)
+  )
+GROUP BY c.id, c.nome;
 
-/* (d) O “top da rodada”: para uma rodada consolidada, o técnico de maior pontuação, o
-nome do seu time, a pontuação e o capitão escolhido. Em caso de empate, vence quem
-confirmou a escalação primeiro.*/
+SELECT atual.nome, atual.jogos_sem_sofrer_gol
+FROM vw_jogos_sem_sofrer_gol atual
+LEFT JOIN vw_jogos_sem_sofrer_gol outro
+ON outro.jogos_sem_sofrer_gol > atual.jogos_sem_sofrer_gol OR (outro.jogos_sem_sofrer_gol = atual.jogos_sem_sofrer_gol AND outro.clube_id < atual.clube_id)
+WHERE outro.clube_id IS NULL;
 
+-- (f) Capitão mais escolhido em escalações confirmadas. Parâmetro: liga 1.
+CREATE OR REPLACE VIEW vw_capitaes_liga AS
+SELECT pl.liga_id, a.id AS atleta_id, a.apelido, COUNT(*) AS vezes_capitao
+FROM participacao_liga pl
+JOIN escalacao e ON e.tecnico_id = pl.tecnico_id
+JOIN escalacao_atleta ea ON ea.tecnico_id = e.tecnico_id AND ea.rodada_numero = e.rodada_numero
+JOIN atleta a ON a.id = ea.atleta_id
+WHERE e.estado = 'confirmada' AND ea.is_capitao
+GROUP BY pl.liga_id, a.id, a.apelido;
 
+SELECT atual.apelido, atual.vezes_capitao
+FROM vw_capitaes_liga atual
+LEFT JOIN vw_capitaes_liga outro
+  ON outro.liga_id = atual.liga_id
+ AND (
+     outro.vezes_capitao > atual.vezes_capitao
+     OR (outro.vezes_capitao = atual.vezes_capitao AND outro.atleta_id < atual.atleta_id)
+ )
+WHERE atual.liga_id = 1 AND outro.atleta_id IS NULL;
 
-SELECT 
-    e.tecnico_id,
-    t.nome_time,
-    f_pontos_escalacao(e.tecnico_id, e.rodada_numero) AS pontuacao,
-    (SELECT a.apelido FROM escalacao_atleta ea JOIN atleta a ON ea.atleti_id = a.id WHERE ea.tecnico_id = e.tecnico_id AND ea.rodada_numero = e.rodada_numero AND ea.is_capitao = TRUE) AS capitao
+-- (g) Técnicos que nunca confirmaram atleta do clube informado. Parâmetro: clube 10.
+CREATE OR REPLACE VIEW vw_clube_escalado AS
+SELECT e.tecnico_id, acr.clube_id
 FROM escalacao e
-JOIN tecnico t ON e.tecnico_id = t.id
-WHERE e.rodada_numero = 5 -- Parâmetro: número da rodada
-  AND e.estado = 'confirmada'
-ORDER BY pontuacao DESC, e.data_confirmacao ASC
-LIMIT 1;
+JOIN escalacao_atleta ea ON ea.tecnico_id = e.tecnico_id AND ea.rodada_numero = e.rodada_numero
+JOIN atleta_clube_rodada acr ON acr.atleta_id = ea.atleta_id AND acr.rodada_numero = ea.rodada_numero
+WHERE e.estado = 'confirmada'
+GROUP BY e.tecnico_id, acr.clube_id;
 
-
-/*-- (e) O clube com mais jogos sem sofrer gol nas últimas 5 rodadas consolidadas, calculado a
-partir dos placares das partidas.*/
-
-WITH ultimas_rodadas AS (
-    SELECT numero FROM rodada WHERE estado = 'consolidada' ORDER BY numero DESC LIMIT 5
-),
-jogos_sem_gol AS (
-    SELECT mandante_id AS clube_id FROM partida p JOIN ultimas_rodadas ur ON p.rodada_numero = ur.numero WHERE p.valida = TRUE AND p.placar_visitante = 0
-    UNION ALL
-    SELECT visitante_id AS clube_id FROM partida p JOIN ultimas_rodadas ur ON p.rodada_numero = ur.numero WHERE p.valida = TRUE AND p.placar_mandante = 0
-)
-SELECT c.nome, COUNT(*) AS jogos_sem_sofrer_gol
-FROM jogos_sem_gol jsg
-JOIN clube c ON jsg.clube_id = c.id
-GROUP BY c.id, c.nome
-ORDER BY jogos_sem_sofrer_gol DESC
-LIMIT 1;
-
-
-
-/*(f) O atleta mais escolhido como capitão dentro de uma liga, com a quantidade de vezes.*/
-
-SELECT a.apelido, COUNT(*) AS vezes_capitao
-FROM escalacao_atleta ea
-JOIN participacao_liga pl ON ea.tecnico_id = pl.tecnico_id
-JOIN atleta a ON ea.atleta_id = a.id
-WHERE pl.liga_id = 1 -- Parâmetro: ID da liga
-  AND ea.is_capitao = TRUE
-GROUP BY a.id, a.apelido
-ORDER BY vezes_capitao DESC
-LIMIT 1;
-
-
--- (g) Os técnicos que nunca escalaram nenhum atleta de um clube informado.
 SELECT t.id, t.nome, t.nome_time
 FROM tecnico t
-WHERE NOT EXISTS (
-    SELECT 1 
-    FROM escalacao_atleta ea
-    JOIN atleta_clube_rodada acr ON ea.atleta_id = acr.atleta_id AND ea.rodada_numero = acr.rodada_numero
-    WHERE ea.tecnico_id = t.id AND acr.clube_id = 10 -- Parâmetro: ID do clube
-);
+LEFT JOIN vw_clube_escalado ce ON ce.tecnico_id = t.id AND ce.clube_id = 10
+WHERE ce.tecnico_id IS NULL;
 
+-- (h) Atletas acima da média da posição em todas as rodadas em que jogaram.
+CREATE OR REPLACE VIEW vw_media_posicao AS
+SELECT rodada_numero, posicao, SUM(pontos) / COUNT(*) AS media
+FROM vw_pontos_atleta
+GROUP BY rodada_numero, posicao;
 
-/*(h) Os atletas que, em todas as rodadas consolidadas em que entraram em campo, pontuaram acima da média da sua posição naquela rodada.*/
+CREATE OR REPLACE VIEW vw_atleta_nao_superou_media AS
+SELECT pa.atleta_id
+FROM vw_pontos_atleta pa
+JOIN vw_media_posicao mp ON mp.rodada_numero = pa.rodada_numero
+                          AND mp.posicao = pa.posicao
+WHERE pa.pontos <= mp.media
+GROUP BY pa.atleta_id;
 
-WITH media_posicao_rodada AS (
-    SELECT 
-        p.rodada_numero,
-        a.posicao,
-        AVG(f_pontos_atleta(a.id, p.rodada_numero)) AS media_pos
-    FROM atleta_partida ap
-    JOIN partida p ON ap.partida_id = p.id
-    JOIN atleta a ON ap.atleta_id = a.id
-    JOIN rodada r ON p.rodada_numero = r.numero
-    WHERE ap.entrou_em_campo = TRUE AND r.estado = 'consolidada'
-    GROUP BY p.rodada_numero, a.posicao
-),
-desempenho_atleta AS (
-    SELECT 
-        ap.atleta_id,
-        p.rodada_numero,
-        f_pontos_atleta(ap.atleta_id, p.rodada_numero) AS pts,
-        mpr.media_pos
-    FROM atleta_partida ap
-    JOIN partida p ON ap.partida_id = p.id
-    JOIN atleta a ON ap.atleta_id = a.id
-    JOIN rodada r ON p.rodada_numero = r.numero
-    JOIN media_posicao_rodada mpr ON p.rodada_numero = mpr.rodada_numero AND a.posicao = mpr.posicao
-    WHERE ap.entrou_em_campo = TRUE AND r.estado = 'consolidada'
-)
-SELECT DISTINCT a.id, a.apelido
+SELECT a.id, a.apelido
 FROM atleta a
-WHERE NOT EXISTS (
-    SELECT 1 FROM desempenho_atleta da 
-    WHERE da.atleta_id = a.id AND da.pts <= da.media_pos
-)
-AND EXISTS (
-    SELECT 1 FROM desempenho_atleta da WHERE da.atleta_id = a.id
-);
+JOIN vw_resumo_atleta ra ON ra.atleta_id = a.id
+LEFT JOIN vw_atleta_nao_superou_media n ON n.atleta_id = a.id
+WHERE n.atleta_id IS NULL;
 
+-- (i) Evolução do patrimônio e diferença para o registro anterior. Parâmetro: técnico 1.
+CREATE OR REPLACE VIEW vw_rodada_patrimonio_anterior AS
+SELECT atual.tecnico_id,
+       atual.rodada_numero,
+       MAX(anterior.rodada_numero) AS rodada_anterior
+FROM patrimonio_rodada atual
+LEFT JOIN patrimonio_rodada anterior ON anterior.tecnico_id = atual.tecnico_id AND anterior.rodada_numero < atual.rodada_numero
+GROUP BY atual.tecnico_id, atual.rodada_numero;
 
--- (i) A evolução do patrimônio de um técnico rodada a rodada, com a variação em relação à
-rodada anterior.
-SELECT 
-    rodada_numero,
-    patrimonio,
-    patrimonio - LAG(patrimonio, 1, patrimonio) OVER (ORDER BY rodada_numero) AS variacao
-FROM patrimonio_rodada
-WHERE tecnico_id = 1 -- Parâmetro: ID do técnico
-ORDER BY rodada_numero;
+SELECT atual.rodada_numero,
+       atual.patrimonio,
+       atual.patrimonio - COALESCE(anterior.patrimonio, atual.patrimonio) AS variacao
+FROM patrimonio_rodada atual
+JOIN vw_rodada_patrimonio_anterior r ON r.tecnico_id = atual.tecnico_id AND r.rodada_numero = atual.rodada_numero
+LEFT JOIN patrimonio_rodada anterior ON anterior.tecnico_id = atual.tecnico_id AND anterior.rodada_numero = r.rodada_anterior
+WHERE atual.tecnico_id = 1
+ORDER BY atual.rodada_numero;
 
+-- (j) Ligas com três ou mais participantes e média acima da média geral.
+CREATE OR REPLACE VIEW vw_media_geral AS
+SELECT SUM(pontuacao_acumulada) / COUNT(*) AS media
+FROM vw_total_tecnico
+HAVING COUNT(*) > 0;
 
-/*(j) As ligas com pelo menos 3 participantes cuja pontuação média por técnico, no acumulado, seja maior que a média geral de todos os técnicos do sistema.*/
+CREATE OR REPLACE VIEW vw_media_liga AS
+SELECT l.id AS liga_id, l.nome,
+       SUM(tp.pontuacao_acumulada) / COUNT(*) AS media_liga
+FROM liga l
+JOIN vw_total_participante tp ON tp.liga_id = l.id
+GROUP BY l.id, l.nome
+HAVING COUNT(*) >= 3;
 
-WITH media_tecnicos AS (
-    SELECT tecnico_id, COALESCE(SUM(f_pontos_escalacao(tecnico_id, rodada_numero)), 0) AS total_pts
-    FROM escalacao WHERE estado = 'confirmada'
-    GROUP BY tecnico_id
-),
-media_geral AS (
-    SELECT AVG(total_pts) AS geral FROM media_tecnicos
-),
-media_por_liga AS (
-    SELECT 
-        l.id,
-        l.nome,
-        COUNT(pl.tecnico_id) AS qtd_participantes,
-        AVG(mt.total_pts) AS media_liga
-    FROM liga l
-    JOIN participacao_liga pl ON l.id = pl.liga_id
-    JOIN media_tecnicos mt ON pl.tecnico_id = mt.tecnico_id
-    GROUP BY l.id, l.nome
-    HAVING COUNT(pl.tecnico_id) >= 3
-)
-SELECT mpl.id, mpl.nome, mpl.media_liga
-FROM media_por_liga mpl
-CROSS JOIN media_geral mg
-WHERE mpl.media_liga > mg.geral;
+SELECT ml.liga_id, ml.nome, ml.media_liga
+FROM vw_media_liga ml
+JOIN vw_media_geral mg ON ml.media_liga > mg.media;
 
+-- (k) Melhor atleta de cada posição até C$ 12,00. Parâmetro: rodada 4.
+-- Em caso de empate na posição, escolhe o menor ID.
+CREATE OR REPLACE VIEW vw_candidatos_selecao AS
+SELECT pa.atleta_id, pa.apelido, pa.posicao, pa.rodada_numero, hp.preco, pa.pontos
+FROM vw_pontos_atleta pa
+JOIN historico_preco hp ON hp.atleta_id = pa.atleta_id AND hp.rodada_numero = pa.rodada_numero
+WHERE hp.preco <= 12.00;
 
-/*(k) A “seleção da rodada” simplificada: para uma rodada consolidada, o atleta de maior
-pontuação de cada posição, considerando apenas atletas cujo preço naquela rodada era
-de no máximo C$ 12,00, e o custo total desse time.*/
+CREATE OR REPLACE VIEW vw_selecao_rodada AS
+SELECT atual.atleta_id, atual.apelido, atual.posicao, atual.rodada_numero, atual.preco, atual.pontos
+FROM vw_candidatos_selecao atual
+LEFT JOIN vw_candidatos_selecao outro ON outro.rodada_numero = atual.rodada_numero AND outro.posicao = atual.posicao AND (
+     outro.pontos > atual.pontos OR (outro.pontos = atual.pontos AND outro.atleta_id < atual.atleta_id)
+ )
+WHERE outro.atleta_id IS NULL;
 
-WITH atletas_filtrados AS (
-    SELECT 
-        a.id, a.apelido, a.posicao,
-        hp.preco,
-        f_pontos_atleta(a.id, 4) AS pontos, -- Parâmetro: rodada
-        ROW_NUMBER() OVER (PARTITION BY a.posicao ORDER BY f_pontos_atleta(a.id, 4) DESC) as rn
-    FROM atleta a
-    JOIN historico_preco hp ON a.id = hp.atleta_id AND hp.rodada_numero = 4
-    JOIN atleta_partida ap ON a.id = ap.atleta_id
-    JOIN partida p ON ap.partida_id = p.id
-    WHERE p.rodada_numero = 4 AND ap.entrou_em_campo = TRUE AND hp.preco <= 12.00
-)
-SELECT posicao, apelido, preco, pontos
-FROM atletas_filtrados
-WHERE rn = 1;
+CREATE OR REPLACE VIEW vw_custo_selecao AS
+SELECT rodada_numero, SUM(preco) AS custo_total
+FROM vw_selecao_rodada
+GROUP BY rodada_numero;
 
-
-
-
-
+SELECT s.posicao, s.apelido, s.preco, s.pontos, c.custo_total
+FROM vw_selecao_rodada s
+JOIN vw_custo_selecao c ON c.rodada_numero = s.rodada_numero
+WHERE s.rodada_numero = 4
+ORDER BY s.posicao;
